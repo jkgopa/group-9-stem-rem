@@ -1,0 +1,300 @@
+---
+title: "velten_final"
+author: "Group 9"
+date: "3/10/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+#packages to load
+library("tidyverse")
+library("tibble")
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+remotes::install_version("Seurat", version = "4.0.4")
+remotes::install_version("SeuratObject", version = "4.0.2")
+library("Seurat")
+
+library(gprofiler2)
+library(clusterProfiler)
+library(enrichplot)
+library(DOSE)
+```
+
+```{r}
+#read in file
+velten <- readRDS(file = "MutaSeq.final.seurat.RDS")
+
+#UMAP of all cells in velten dataset combined
+pdf(file = "velten_UMAP.pdf",
+    width = 12, 
+    height = 9)
+DimPlot(velten, reduction = "umap", label = TRUE)
+dev.off()
+
+#identify TCL1A positive cells and add TCL1A status as column called TCL1A_exp to metadata to use as input for subsequent UMAP
+velt_poscells <- WhichCells(velten, expression = TCL1A > 0)
+velten@meta.data$TCL1A_exp<- ifelse(rownames(velten@meta.data) %in% velt_poscells, "tcl1a_pos", "tcl1a_neg")
+
+#UMAP of TCL1A expression by TCL1A status
+pdf(file = "velten_TCL1A_patient_UMAP.pdf",
+    width = 14, 
+    height = 4)
+DimPlot(velten, cells.highlight = velt_poscells, split.by = "patient")
+dev.off()
+```
+
+```{r}
+#create data frame of velten meta data to manipulate for analysis
+velten_meta_data <- as.data.frame(velten@meta.data)
+velten_meta_data  <- rownames_to_column(velten_meta_data, var = "cell_num")
+
+#create data frame of RNA counts to find cells with more than 1 TCL1A RNA transcript
+rna_counts <- as.data.frame(velten@assays$RNA@counts)
+tcl1a_counts <- as_tibble(rna_counts[c("TCL1A"),])
+tcl1a_counts[tcl1a_counts == "0"] <- NA
+cells_with_tcl1a <- as.data.frame(colnames(tcl1a_counts[ , colSums(is.na(tcl1a_counts)) == 0]))
+names(cells_with_tcl1a)[1] <- 'cell_num'
+cells_with_tcl1a$status <- "TCL1A_pos"
+
+#combine cells_with_tcl1a to velten meta data to create new dataframe with column called status for tcl1a expression
+total_velten_barcodes <- left_join(velten_meta_data, cells_with_tcl1a, by = c("cell_num")) %>%
+  mutate_at(vars(status), ~replace_na(., "TCL1A_neg"))
+
+#calculate number of tcl1a positive cells in each clone in each potient
+number_of_tcl_per_clone <- as.data.frame(table(total_velten_barcodes$status, total_velten_barcodes$mainClone, total_velten_barcodes$patient))
+#calculate total number of cells in each clone
+total_num_per_clone <- as.data.frame(table(total_velten_barcodes$mainClone))
+
+#add cell type annotations to total_velten_barcodes to make full_velten_metadata
+cell_types <- as.data.frame(velten@active.ident)
+names(cell_types)[1] <- 'cell_type'
+cell_types  <- rownames_to_column(cell_types, var = "cell_num")
+full_velten_metadata <- left_join(total_velten_barcodes, cell_types, by = c("cell_num"))
+```
+
+```{r}
+#subset full_velten_metadata to just sample H1 and P1
+p1_metadata <- full_velten_metadata %>% filter(grepl('P1', patient))
+h1_metadata <- full_velten_metadata %>% filter(grepl('H1', patient))
+p1_h1_metadata <- rbind(p1_metadata, h1_metadata)
+```
+
+```{r}
+#calculate percent of tcl1a positive cells for each in each patient
+p1_h1_metadata$cell_type_mut <- paste(p1_h1_metadata$patient,p1_h1_metadata$mainClone, p1_h1_metadata$cell_type)
+total_num_celltypes <- as.data.frame(table(p1_h1_metadata$cell_type_mut))
+names(total_num_celltypes) <- c('Var2','Total')
+tcl1a_positive_celltypes <- as.data.frame(table(p1_h1_metadata$status, p1_h1_metadata$cell_type_mut))
+tcl1a_percent <- left_join(tcl1a_positive_celltypes, total_num_celltypes)
+tcl1a_percent$percent <- tcl1a_percent$Freq/tcl1a_percent$Total*100
+tcl1a_pos_percent <- tcl1a_percent %>% filter(grepl('TCL1A_pos', Var1))
+
+#subset to just hspc's cell in each patient
+cells_of_interest_a <- tcl1a_pos_percent %>% filter(str_detect(Var2, "HS")) %>% filter(!grepl('T.cell', Var2))
+cells_of_interest_b <- tcl1a_pos_percent %>% filter(str_detect(Var2, "CD34\\+ Blasts")) %>% filter(!grepl('HSPC', Var2))
+cells_of_interest <- rbind(cells_of_interest_a, cells_of_interest_b)
+```
+
+```{r}
+#refactoring levels so their order makes more sense in subsequent plots
+levels <- c("H1 non-leukemic HSC/MPPs", "H1 non-leukemic Mitotic HSPCs (G2/M)", "H1 non-leukemic CD34+ Blasts and HSPCs", 
+            "H1 non-leukemic CD34+ Blasts", "P1 non-leukemic CD34+ Blasts and HSPCs", "P1 non-leukemic CD34+ Blasts",
+            "P1 preleukemic HSC/MPPs", "P1 preleukemic Mitotic HSPCs (G2/M)", "P1 preleukemic CD34+ Blasts and HSPCs",
+            "P1 preleukemic CD34+ Blasts", "P1 leukemic.KLF7 HSC/MPPs", "P1 leukemic.KLF7 Mitotic HSPCs (G2/M)",
+            "P1 leukemic.KLF7 CD34+ Blasts and HSPCs", "P1 leukemic.KLF7 CD34+ Blasts", "P1 leukemic.CEBPA HSC/MPPs",
+            "P1 leukemic.CEBPA Mitotic HSPCs (G2/M)", "P1 leukemic.CEBPA CD34+ Blasts and HSPCs", 
+            "P1 leukemic.CEBPA CD34+ Blasts")
+cells_of_interest$Var2 <- factor(cells_of_interest$Var2 , levels = levels)
+
+#barplot of % tcl1a expression in patient's hspc's
+ggplot(cells_of_interest, aes(y=percent, x=Var2)) + 
+    geom_bar(position="dodge", stat="identity") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+#Labeling cells using our own category labels
+#create new dataset of only hspc's in P1 and H1
+hsc_p1_h1_metadata <- p1_h1_metadata
+
+#function to do opposite of %in% function
+`%!in%` <- Negate(`%in%`)
+
+#gating scheme to create new category labels to distinguish patient status, mutational status, and tcl1a status of each hspc
+hspcs <- c("HSC/MPPs", "Mitotic HSPCs (G2/M)", "CD34+ Blasts and HSPCs","CD34+ Blasts")
+hsc_p1_h1_metadata$broad_categories <- ifelse(hsc_p1_h1_metadata$patient == "P1" & hsc_p1_h1_metadata$TCL1A_exp == "tcl1a_pos" &
+                                hsc_p1_h1_metadata$mainClone != "non-leukemic" &
+                                hsc_p1_h1_metadata$cell_type %in% hspcs,
+                      "P1 TCL1A Positive Mutated HSPC",
+                      ifelse(hsc_p1_h1_metadata$patient == "P1" & hsc_p1_h1_metadata$TCL1A_exp == "tcl1a_neg" &
+                                hsc_p1_h1_metadata$mainClone != "non-leukemic" &
+                                hsc_p1_h1_metadata$cell_type %in% hspcs,
+                             "P1 TCL1A Negative Mutated HSPC",
+                             ifelse(hsc_p1_h1_metadata$patient == "P1" & hsc_p1_h1_metadata$TCL1A_exp == "tcl1a_neg" &
+                                hsc_p1_h1_metadata$mainClone == "non-leukemic" &
+                                hsc_p1_h1_metadata$cell_type %!in% hspcs,
+                             "P1 TCL1A Negative non-Mutated HSPC",
+                             ifelse(hsc_p1_h1_metadata$patient == "H1" & hsc_p1_h1_metadata$TCL1A_exp == "tcl1a_neg" &
+                                hsc_p1_h1_metadata$cell_type %!in% hspcs,
+                             "H1 TCL1A Negative non-Mutated HSPC",
+                             "Other"))))
+
+table(hsc_p1_h1_metadata$broad_categories)
+
+#add new category labels to full metadata and replace NA (cells in other 3 patients) to no interest
+full_data_broad_categories <- full_join(total_velten_barcodes, hsc_p1_h1_metadata) %>%
+  select(c('cell_num', 'broad_categories'))
+table(full_data_broad_categories$broad_categories)
+full_data_broad_categories$broad_categories <- full_data_broad_categories$broad_categories %>% replace_na('No Interest')
+table(full_data_broad_categories$broad_categories)
+
+#add our category labels to Seurat Object's metadata
+velten_celltypes_of_interest <- AddMetaData(
+  object = velten,
+  metadata = full_data_broad_categories$broad_categories,
+  col.name = 'broad_categories'
+)
+
+#set our cell category labels as active Ident
+velten_celltypes_of_interest
+velten_celltypes_of_interest <- SetIdent(velten_celltypes_of_interest, value = velten_celltypes_of_interest@meta.data$broad_categories)
+DimPlot(velten_celltypes_of_interest)
+
+```
+
+```{r}
+#DEG analysis
+#perform DE analysis comparing P1 TCL1A Positive Mutated HSPC to P1 TCL1A Negative Mutated HSPC and P1 TCL1A Negative non-Mutated HSPC
+cell_types_to_compare <- c("P1 TCL1A Negative Mutated HSPC", "P1 TCL1A Negative non-Mutated HSPC")
+tcl1a.hsc.de.markers <- FindMarkers(velten_celltypes_of_interest, ident.1 = "P1 TCL1A Positive Mutated HSPC", ident.2 = cell_types_to_compare, min.pct = 0.1, min.cells.group = 1)
+up.de.markers <- subset(tcl1a.hsc.de.markers, avg_log2FC > 0)
+up_names = gconvert(row.names(tcl1a.hsc.de.markers))
+down.de.markers <- subset(tcl1a.hsc.de.markers, avg_log2FC < 0)
+down_names = gconvert(row.names(tcl1a.hsc.de.markers))
+
+#create ordered list of top up-regulated genes by log2FC
+up_ordered = up.de.markers[order(up.de.markers$avg_log2FC, decreasing = TRUE),]
+gp_up_ordered = gost(row.names(up_ordered), organism = "hsapiens",
+		        ordered_query = TRUE, evcodes = TRUE)
+head(gp_up_ordered$result)
+```
+
+```{r}
+#subset the dataset to only include cell types to be plotted in DEG dot plot
+KP<-subset(velten_celltypes_of_interest, subset = broad_categories == "P1 TCL1A Negative Mutated HSPC" | broad_categories == "P1 TCL1A Positive Mutated HSPC" | broad_categories == "P1 TCL1A Negative non-Mutated HSPC")
+
+#setting levels for the most important figure of all 
+levels <- c("P1 TCL1A Negative non-Mutated HSPC", "P1 TCL1A Negative Mutated HSPC", "P1 TCL1A Positive Mutated HSPC")
+KP@active.ident <- factor(KP@active.ident , levels = levels)
+
+#the most important figure of all: dot plot of most differentially expressed genes
+tcl1a_genes<-c("UBE2C", "NR4A2", "MYC", "GNA15", "DUSP14", "NUP37", "ZSCAN18", "MGLL")
+pdf(file = "DotPlot_DEG.pdf",
+    width = 10,
+    height = 4)
+p<-DotPlot(KP, features = tcl1a_genes, scale = TRUE, scale.by = "radius") + RotatedAxis()
+p + labs(x = "Top Differentially Expressed Genes", y = "Cell Status")
+dev.off()
+```
+
+```{r}
+#adapted from: https://f1000research.com/articles/9-709
+#Since the output of the gost function is stored in a standard data frame format, it is easy to alter it for custom visualisations using ggplot2, enrichplot28, clusterProfiler10 or any other similar package
+#using ordered list of upregulated genes
+gp_mod = gp_up_ordered$result[,c("query", "source", "term_id",
+                                "term_name", "p_value", "query_size", 
+                                "intersection_size", "term_size", 
+                                "effective_domain_size", "intersection")]
+gp_mod$GeneRatio = paste0(gp_mod$intersection_size,  "/", gp_mod$query_size)
+gp_mod$BgRatio = paste0(gp_mod$term_size, "/", gp_mod$effective_domain_size)
+names(gp_mod) = c("Cluster", "Category", "ID", "Description", "p.adjust", 
+                    "query_size", "Count", "term_size", "effective_domain_size", 
+                    "geneID", "GeneRatio", "BgRatio")
+gp_mod$geneID = gsub(",", "/", gp_mod$geneID)
+row.names(gp_mod) = gp_mod$ID
+
+# define as compareClusterResult object
+gp_mod_cluster = new("compareClusterResult", compareClusterResult = gp_mod)
+
+# define as enrichResult object
+gp_mod_enrich  = new("enrichResult", result = gp_mod)
+
+#barplot of upregulated geneset pathways in P1 TCL1A Positive Mutated HSPC's
+pdf(file = "de_pathways.pdf",
+    width = 15, 
+    height = 20)
+  barplot(gp_mod_enrich, showCategory = 20, font.size = 22) + 
+  ggplot2::facet_grid(~Cluster) +
+  ggplot2::ylab("Intersection size")
+dev.off()
+```
+
+```{r}
+#CellCycleScoring
+#genes to identify different cell states
+velten_celltypes_of_interest_cellcycle <- velten_celltypes_of_interest
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+velten_celltypes_of_interest_cellcycle <- CellCycleScoring(velten_celltypes_of_interest_cellcycle, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+#calculate percent of cells in S phase for S-phase fraction
+cell_cycle_scoring <- as.data.frame.matrix(table(velten_celltypes_of_interest_cellcycle@meta.data$broad_categories, velten_celltypes_of_interest_cellcycle@meta.data$Phase))
+cell_cycle_scoring$total <- cell_cycle_scoring$G1 + cell_cycle_scoring$G2 + cell_cycle_scoring$S
+cell_cycle_scoring$Percent_S_Phase <- cell_cycle_scoring$S/cell_cycle_scoring$total
+
+#subset to just HSCP's of interest
+cell_cycle_scoring <- rownames_to_column(cell_cycle_scoring)
+cell_cycle_scoring_subset <- cell_cycle_scoring[4:6,]
+```
+
+```{r}
+#barplot of S-phase fraction
+pdf(file = "cell_cycle_scoring.pdf",
+    width = 20, 
+    height = 40)
+ggplot(cell_cycle_scoring_subset, aes(y=Percent_S_Phase, x=rowname)) + 
+    geom_bar(position="dodge", stat="identity", fill = "darkred") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), text = element_text(size = 50)) +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank())
+dev.off()
+```
+
+```{r}
+#CytoTrace 
+#table of log normalized counts of cell types of interest to import into cytotrace.stanford.edu
+cellnum_of_interest <- hsc_p1_h1_metadata$cell_num
+velten_celltypes_of_interest_cytotrace <- velten_celltypes_of_interest
+velten_gene_counts_input <- as.data.frame(velten_celltypes_of_interest_cytotrace[["RNA"]]@data)
+h1_p1_gene_counts <- velten_gene_counts_input[,colnames(velten_gene_counts_input) %in% cellnum_of_interest]
+
+#table of phenotype labels of cell types of interest
+velten_cell_type_input <- rownames_to_column(velten_celltypes_of_interest_cytotrace@meta.data)
+velten_cell_type_input <- velten_cell_type_input[,c("rowname","broad_categories")]
+h1_p1_phenotypes <- velten_cell_type_input[velten_cell_type_input$rowname %in% cellnum_of_interest,]
+```
+
+```{r}
+#final tables to write out and then import into cytotrace.stanford.edu
+Cyto_counts = h1_p1_gene_counts[, 1:2464]
+Cyto_pheno = h1_p1_phenotypes[1:2464,]
+
+write.table(Cyto_counts, "CytoTrace_counts.csv", sep = ",")
+write.table(Cyto_pheno,
+            "CytoTrace_pheno.csv",
+            sep = ",",
+            col.names = FALSE,
+            row.names = FALSE)
+```
+
