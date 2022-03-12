@@ -1,0 +1,73 @@
+---
+title: "Dussiau 2021"
+author: "Group 9"
+date: "3/10/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+#Load packages
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(tibble)
+library(plyr)
+library(sctransform)
+library(SingleR)
+remotes::install_version("SeuratObject", version = "0.3.0")
+library(sctransform)
+```
+
+```{r}
+# Load the dussiau dataset
+dussiau <- readRDS(file = "GSE169426_Ctrl13MDS24.matrix.RDS")
+
+#create seurat object and create list of TCL1A+ cells and add TCL1A status to meta data
+#create two new columns of patient condition and cell number
+dussiau_SO <- CreateSeuratObject(counts = dussiau, project = "dussiau", min.cells = 3, min.features = 200)
+poscells <- WhichCells(dussiau_SO, expression = TCL1A > 0)
+dussiau_SO$TCL1A_exp <- ifelse(colnames(dussiau_SO) %in% poscells, "tcl1a_pos", "tcl1a_neg")
+dussiau_SO@meta.data$cell_condition <- rownames(dussiau_SO@meta.data)
+dussiau_SO@meta.data$condition <- gsub(".*-","", dussiau_SO@meta.data$cell_condition)
+table(dussiau_SO@meta.data$condition)
+```
+
+```{r}
+#QC filtering based on percent.mt and then performing SCTransform
+dussiau_SO[["percent.mt"]] <- PercentageFeatureSet(dussiau_SO, pattern = "^MT-")
+dussiau_SO_subset <- subset(dussiau_SO, subset = nFeature_RNA > 500 & nFeature_RNA < 5500 & percent.mt < 10)
+dussiau_SO_subset_norm <- SCTransform(dussiau_SO_subset, vars.to.regress = "percent.mt", verbose = FALSE)
+
+#Linear dimensional reduction and clustering of cells
+dussiau_clean <- dussiau_SO_subset_norm
+dussiau_clean <- RunPCA(dussiau_clean, verbose = FALSE)
+ElbowPlot(dussiau_clean)
+dussiau_clean <- RunUMAP(dussiau_clean, dims = 1:10, verbose = FALSE)
+dussiau_clean <- FindNeighbors(dussiau_clean, dims = 1:10, verbose = FALSE)
+dussiau_clean <- FindClusters(dussiau_clean, verbose = FALSE)
+DimPlot(dussiau_clean, label = TRUE) + NoLegend()
+```
+
+```{r}
+#UMAP split by patient
+pdf(file = "patient_UMAP.pdf",
+    width = 14, 
+    height = 5)
+DimPlot(dussiau_clean, label = TRUE, split.by = "condition") + NoLegend()
+dev.off()
+
+#UMAP of TCL1A expression split by patient
+pdf(file = "patient_TCL1A.pdf",
+    width = 19,
+    height = 5)
+FeaturePlot(dussiau_clean, features = "TCL1A", split.by = "condition", order = TRUE) + NoLegend()
+dev.off()
+```
+
+
