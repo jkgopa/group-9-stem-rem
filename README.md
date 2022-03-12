@@ -6,4 +6,4 @@ velten_final is the code to replicate Figures 2-4 of the paper "Investigating TC
 
 For any questions, please email: sluna@stanford.edu, kprothro@stanford.edu, jkgopa@stanford.edu
 
-For help with dot plot please email: kprothro@stanford.edu
+For help with dot plot, please email: kprothro@stanford.edu
